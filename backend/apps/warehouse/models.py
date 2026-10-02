@@ -5,6 +5,21 @@ from django.db import models
 from apps.authentication.models import User
 
 
+class HandoffStatus(models.TextChoices):
+    """交接单状态"""
+    DRAFT = 'draft', '待冻结'
+    FROZEN = 'frozen', '已冻结待确认'
+    RETURNED = 'returned', '已退回修订'
+    COMPLETED = 'completed', '已完成'
+
+
+class HandoffItemStatus(models.TextChoices):
+    """交接明细确认状态"""
+    PENDING = 'pending', '待确认'
+    CONFIRMED = 'confirmed', '已确认'
+    DISPUTED = 'disputed', '有差异'
+
+
 class Unit(models.Model):
     """单位模型"""
     name = models.CharField('单位名称', max_length=5, unique=True)
@@ -246,3 +261,154 @@ class Approval(models.Model):
     
     def __str__(self):
         return f"{self.stock_out} - {self.get_status_display()}"
+
+
+class HandoffList(models.Model):
+    """物资交接清单：经双方确认后才完成保管责任转移"""
+
+    handoff_no = models.CharField('交接单号', max_length=40, unique=True)
+    version = models.PositiveIntegerField('清单版本', default=1)
+    status = models.CharField(
+        '状态', max_length=20,
+        choices=HandoffStatus.choices, default=HandoffStatus.DRAFT
+    )
+    transferor = models.ForeignKey(
+        User, on_delete=models.PROTECT,
+        related_name='handoffs_as_transferor', verbose_name='移交人'
+    )
+    receiver = models.ForeignKey(
+        User, on_delete=models.PROTECT,
+        related_name='handoffs_as_receiver', verbose_name='接收人'
+    )
+    frozen_at = models.DateTimeField('冻结时间', null=True, blank=True)
+    completed_at = models.DateTimeField('完成时间', null=True, blank=True)
+    custodian = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='handoffs_as_custodian', verbose_name='最终责任人'
+    )
+    idempotency_key = models.CharField(
+        '幂等键', max_length=64, unique=True, null=True, blank=True
+    )
+    remark = models.TextField('备注', blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'wh_handoff_list'
+        verbose_name = '物资交接清单'
+        verbose_name_plural = verbose_name
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.handoff_no} v{self.version}({self.get_status_display()})"
+
+
+class HandoffItem(models.Model):
+    """交接清单明细：冻结时快照，确认时逐项核对"""
+
+    handoff = models.ForeignKey(
+        HandoffList, on_delete=models.CASCADE,
+        related_name='items', verbose_name='交接清单'
+    )
+    goods = models.ForeignKey(
+        Goods, on_delete=models.PROTECT,
+        related_name='handoff_items', verbose_name='物资'
+    )
+    goods_name = models.CharField('物资名称', max_length=200)
+    goods_code = models.CharField('物资编码', max_length=50)
+    expected_quantity = models.DecimalField('移交数量', max_digits=12, decimal_places=2)
+    seal_no = models.CharField('封签号', max_length=100, blank=True)
+    location = models.CharField('存放位置', max_length=100, blank=True)
+    actual_quantity = models.DecimalField(
+        '实收数量', max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    actual_seal_no = models.CharField('实查封签号', max_length=100, blank=True)
+    actual_location = models.CharField('实查存放位置', max_length=100, blank=True)
+    item_status = models.CharField(
+        '确认状态', max_length=20,
+        choices=HandoffItemStatus.choices, default=HandoffItemStatus.PENDING
+    )
+    difference_reason = models.TextField('差异原因', blank=True)
+    confirmed_at = models.DateTimeField('确认时间', null=True, blank=True)
+
+    class Meta:
+        db_table = 'wh_handoff_item'
+        verbose_name = '交接清单明细'
+        verbose_name_plural = verbose_name
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.goods_code} x {self.expected_quantity}"
+
+
+class HandoffEvent(models.Model):
+    """交接过程事件：记录每次状态流转，支撑版本追溯"""
+
+    ACTION_CHOICES = [
+        ('created', '创建清单'),
+        ('frozen', '冻结清单'),
+        ('item_confirmed', '逐项确认'),
+        ('returned', '退回修订'),
+        ('completed', '完成交接'),
+        ('rejected', '生效被拒'),
+        ('amended', '更正记录'),
+    ]
+
+    handoff = models.ForeignKey(
+        HandoffList, on_delete=models.CASCADE,
+        related_name='events', verbose_name='交接清单'
+    )
+    version = models.PositiveIntegerField('发生时版本')
+    action = models.CharField('事件类型', max_length=20, choices=ACTION_CHOICES)
+    operator = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='handoff_events', verbose_name='操作人'
+    )
+    detail = models.TextField('事件详情', blank=True)
+    created_at = models.DateTimeField('发生时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'wh_handoff_event'
+        verbose_name = '交接事件'
+        verbose_name_plural = verbose_name
+        ordering = ['created_at', 'id']
+
+    def __str__(self):
+        return f"{self.handoff_id} v{self.version} {self.action}"
+
+
+class HandoffCorrection(models.Model):
+    """交接更正记录：已完成清单只能通过更正调整责任归属"""
+
+    handoff = models.ForeignKey(
+        HandoffList, on_delete=models.PROTECT,
+        related_name='corrections', verbose_name='交接清单'
+    )
+    version = models.PositiveIntegerField('更正后版本')
+    goods = models.ForeignKey(
+        Goods, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='handoff_corrections', verbose_name='涉及物资'
+    )
+    reason = models.TextField('更正原因')
+    old_custodian = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='corrections_from', verbose_name='原责任人'
+    )
+    new_custodian = models.ForeignKey(
+        User, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='corrections_to', verbose_name='更正后责任人'
+    )
+    operator = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='handoff_corrections', verbose_name='更正操作人'
+    )
+    created_at = models.DateTimeField('更正时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'wh_handoff_correction'
+        verbose_name = '交接更正记录'
+        verbose_name_plural = verbose_name
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.handoff.handoff_no} 更正v{self.version}"

@@ -10,6 +10,10 @@ from .views import (
     DashboardView, GoodsListView, StockInListView, StockOutListView,
     WarningListView, ApprovalListView
 )
+from .handoff_views import (
+    HandoffListView, HandoffDetailView, HandoffActionView,
+    HandoffItemConfirmView, HandoffCorrectionView,
+)
 
 urlpatterns = [
     # 仪表盘
@@ -48,4 +52,18 @@ urlpatterns = [
     
     # 审批管理
     path('approvals/', ApprovalListView.as_view(), name='approval-list'),
+
+    # 物资交接清单
+    path('handoffs/', HandoffListView.as_view(), name='handoff-list'),
+    path('handoffs/<int:pk>/', HandoffDetailView.as_view(), name='handoff-detail'),
+    path('handoffs/<int:pk>/freeze/',
+         HandoffActionView.as_view(action='freeze'), name='handoff-freeze'),
+    path('handoffs/<int:pk>/return/',
+         HandoffActionView.as_view(action='return'), name='handoff-return'),
+    path('handoffs/<int:pk>/complete/',
+         HandoffActionView.as_view(action='complete'), name='handoff-complete'),
+    path('handoffs/<int:pk>/items/<int:item_pk>/confirm/',
+         HandoffItemConfirmView.as_view(), name='handoff-item-confirm'),
+    path('handoffs/<int:pk>/corrections/',
+         HandoffCorrectionView.as_view(), name='handoff-correction'),
 ]
