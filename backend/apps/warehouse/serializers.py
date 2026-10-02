@@ -2,7 +2,11 @@
 仓库管理序列化器
 """
 from rest_framework import serializers
-from .models import Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval
+from .models import (
+    Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval,
+    HandoverList, HandoverItem, HandoverVersion, HandoverEvent, HandoverCorrection,
+    ITEM_CONFIRM_MATCHED, ITEM_CONFIRM_DIFFERENT,
+)
 
 
 class UnitSerializer(serializers.ModelSerializer):
@@ -193,10 +197,183 @@ class ApprovalSerializer(serializers.ModelSerializer):
     """审批记录序列化器"""
     approver_name = serializers.CharField(source='approver.username', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
+
     class Meta:
         model = Approval
         fields = [
             'id', 'stock_out', 'approver', 'approver_name',
             'status', 'status_display', 'remark', 'created_at', 'updated_at'
         ]
+
+
+# ==================== 交接清单 ====================
+
+class HandoverItemInputSerializer(serializers.Serializer):
+    """交接物资行输入"""
+    goods = serializers.IntegerField(min_value=1)
+    expected_quantity = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0
+    )
+    expected_seal_no = serializers.CharField(max_length=100, allow_blank=True, required=False)
+    expected_location = serializers.CharField(max_length=100, allow_blank=True, required=False)
+
+    def validate_expected_quantity(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('移交数量必须大于0')
+        return value
+
+
+class HandoverCreateSerializer(serializers.Serializer):
+    """创建/修订交接清单输入"""
+    receiver = serializers.IntegerField(min_value=1)
+    transfer_note = serializers.CharField(
+        max_length=1000, allow_blank=True, required=False, default=''
+    )
+    items = HandoverItemInputSerializer(many=True)
+    idempotency_key = serializers.CharField(max_length=128, required=False, allow_blank=True)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError('交接清单至少包含一项物资')
+        goods_ids = [row['goods'] for row in value]
+        if len(set(goods_ids)) != len(goods_ids):
+            raise serializers.ValidationError('同一物资在清单中只能出现一次')
+        return value
+
+
+class HandoverListSerializer(serializers.ModelSerializer):
+    """交接清单主单输出（含双方身份、版本、差异原因、责任归属）"""
+    transferor_name = serializers.CharField(source='transferor.username', read_only=True)
+    transferor_real_name = serializers.CharField(source='transferor.real_name', read_only=True)
+    receiver_name = serializers.CharField(source='receiver.username', read_only=True)
+    receiver_real_name = serializers.CharField(source='receiver.real_name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    responsible_party_display = serializers.CharField(
+        source='get_responsible_party_display', read_only=True
+    )
+    items = serializers.SerializerMethodField()
+    pending_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HandoverList
+        fields = [
+            'id', 'handover_no',
+            'transferor', 'transferor_name', 'transferor_real_name',
+            'receiver', 'receiver_name', 'receiver_real_name',
+            'status', 'status_display', 'version',
+            'responsible_party', 'responsible_party_display',
+            'difference_reason', 'transfer_note',
+            'frozen_at', 'submitted_at', 'completed_at', 'returned_at',
+            'cancelled_at', 'created_at', 'updated_at',
+            'items', 'pending_count',
+        ]
+
+    def _current_version(self, obj):
+        # 冻结后展示当前版本行；编制中/退回展示版本 0 的工作副本
+        return obj.version if obj.version else 0
+
+    def get_items(self, obj):
+        version = self._current_version(obj)
+        items = [item for item in obj.items.all() if item.version == version]
+        items.sort(key=lambda item: item.id)
+        return HandoverItemSerializer(items, many=True).data
+
+    def get_pending_count(self, obj):
+        if obj.status != 'submitted':
+            return 0
+        return sum(
+            1 for item in obj.items.all()
+            if item.version == obj.version and item.confirm_result == 'pending'
+        )
+
+
+class HandoverItemSerializer(serializers.ModelSerializer):
+    """交接物资行输出"""
+    goods_code = serializers.CharField(source='goods.code', read_only=True)
+    goods_name = serializers.CharField(source='goods.name', read_only=True)
+    unit_name = serializers.CharField(
+        source='goods.variety.category.unit.name', read_only=True
+    )
+    confirm_result_display = serializers.CharField(
+        source='get_confirm_result_display', read_only=True
+    )
+    confirmed_by_name = serializers.CharField(source='confirmed_by.username', read_only=True)
+
+    class Meta:
+        model = HandoverItem
+        fields = [
+            'id', 'goods', 'goods_code', 'goods_name', 'unit_name', 'version',
+            'expected_quantity', 'expected_seal_no', 'expected_location',
+            'actual_quantity', 'actual_seal_no', 'actual_location',
+            'confirm_result', 'confirm_result_display', 'difference_reason',
+            'confirmed_by', 'confirmed_by_name', 'confirmed_at',
+        ]
+
+
+class HandoverVersionSerializer(serializers.ModelSerializer):
+    """冻结版本快照输出"""
+    frozen_by_name = serializers.CharField(source='frozen_by.username', read_only=True)
+
+    class Meta:
+        model = HandoverVersion
+        fields = [
+            'id', 'version', 'frozen_by', 'frozen_by_name',
+            'frozen_at', 'item_count', 'item_snapshot',
+        ]
+
+
+class HandoverEventSerializer(serializers.ModelSerializer):
+    """交接事件时间线输出"""
+    actor_name = serializers.CharField(source='actor.username', read_only=True)
+    action_display = serializers.CharField(source='get_action_display', read_only=True)
+
+    class Meta:
+        model = HandoverEvent
+        fields = [
+            'id', 'action', 'action_display', 'actor', 'actor_name',
+            'from_status', 'to_status', 'version', 'detail', 'created_at',
+        ]
+
+
+class HandoverCorrectionSerializer(serializers.ModelSerializer):
+    """交接更正记录输出"""
+    goods_code = serializers.CharField(source='goods.code', read_only=True)
+    goods_name = serializers.CharField(source='goods.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+
+    class Meta:
+        model = HandoverCorrection
+        fields = [
+            'id', 'handover', 'goods', 'goods_code', 'goods_name',
+            'quantity_change', 'correct_seal_no', 'correct_location',
+            'reason', 'detail', 'created_by', 'created_by_name', 'created_at',
+        ]
+
+
+class HandoverCorrectionCreateSerializer(serializers.Serializer):
+    """更正记录输入"""
+    goods = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(min_length=1, max_length=500)
+    quantity_change = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, default=None
+    )
+    correct_seal_no = serializers.CharField(max_length=100, allow_blank=True, required=False)
+    correct_location = serializers.CharField(max_length=100, allow_blank=True, required=False)
+    detail = serializers.CharField(max_length=1000, allow_blank=True, required=False)
+
+
+class HandoverAdjudicateSerializer(serializers.Serializer):
+    """逐项确认输入"""
+    result = serializers.ChoiceField(choices=[ITEM_CONFIRM_MATCHED, ITEM_CONFIRM_DIFFERENT])
+    actual_quantity = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
+    actual_seal_no = serializers.CharField(
+        max_length=100, allow_blank=True, required=False, default=''
+    )
+    actual_location = serializers.CharField(
+        max_length=100, allow_blank=True, required=False, default=''
+    )
+    difference_reason = serializers.CharField(
+        max_length=300, required=False, allow_blank=True, default=''
+    )

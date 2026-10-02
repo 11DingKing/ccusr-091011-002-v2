@@ -10,6 +10,20 @@ from .views import (
     DashboardView, GoodsListView, StockInListView, StockOutListView,
     WarningListView, ApprovalListView
 )
+from .handover_views import (
+    HandoverCorrectionListCreateView,
+    HandoverDetailView,
+    HandoverEventListView,
+    HandoverFreezeView,
+    HandoverItemAdjudicateView,
+    HandoverItemsReviseView,
+    HandoverListCreateView,
+    HandoverOccupancyCheckView,
+    HandoverReturnView,
+    HandoverVersionListView,
+    HandoverCancelView,
+    HandoverCompleteView,
+)
 
 urlpatterns = [
     # 仪表盘
@@ -48,4 +62,28 @@ urlpatterns = [
     
     # 审批管理
     path('approvals/', ApprovalListView.as_view(), name='approval-list'),
+
+    # 交接清单
+    path('handovers/', HandoverListCreateView.as_view(), name='handover-list'),
+    path('handovers/occupancy-check/', HandoverOccupancyCheckView.as_view(),
+         name='handover-occupancy-check'),
+    path('handovers/<int:pk>/', HandoverDetailView.as_view(), name='handover-detail'),
+    path('handovers/<int:pk>/items/', HandoverItemsReviseView.as_view(),
+         name='handover-items-revise'),
+    path('handovers/<int:pk>/freeze/', HandoverFreezeView.as_view(),
+         name='handover-freeze'),
+    path('handovers/<int:pk>/return/', HandoverReturnView.as_view(),
+         name='handover-return'),
+    path('handovers/<int:pk>/complete/', HandoverCompleteView.as_view(),
+         name='handover-complete'),
+    path('handovers/<int:pk>/cancel/', HandoverCancelView.as_view(),
+         name='handover-cancel'),
+    path('handovers/<int:pk>/versions/', HandoverVersionListView.as_view(),
+         name='handover-versions'),
+    path('handovers/<int:pk>/events/', HandoverEventListView.as_view(),
+         name='handover-events'),
+    path('handovers/<int:pk>/corrections/', HandoverCorrectionListCreateView.as_view(),
+         name='handover-corrections'),
+    path('handovers/<int:pk>/items/<int:item_id>/adjudicate/',
+         HandoverItemAdjudicateView.as_view(), name='handover-item-adjudicate'),
 ]
